@@ -8,9 +8,9 @@ import json
 app = Flask(__name__)
 CORS(app)
 
-# --- Inicialización segura de Firebase usando variables de entorno ---
-cred_json = os.getenv("FIREBASE_CRED")  # Contenido del archivo JSON como cadena
-firebase_db_url = os.getenv("FIREBASE_DB")  # URL de la base de datos
+# --- Inicialización de Firebase ---
+cred_json = os.getenv("FIREBASE_CRED")
+firebase_db_url = os.getenv("FIREBASE_DB")
 
 if cred_json and firebase_db_url:
     try:
@@ -42,6 +42,8 @@ def recibir_datos():
     caudal = data.get('caudal')
     obstruccion = data.get('obstruccion')
     canastilla = data.get('canastilla')
+    tapa_abierta = data.get('tapaAbierta')
+    registro_abierto = data.get('registroAbierto')
 
     if not mac:
         return jsonify({"error": "MAC no proporcionada"}), 400
@@ -52,7 +54,9 @@ def recibir_datos():
             "lluvia": lluvia,
             "caudal": caudal,
             "obstruccion": obstruccion,
-            "canastilla": canastilla
+            "canastilla": canastilla,
+            "tapaAbierta": tapa_abierta,
+            "registroAbierto": registro_abierto
         })
         return jsonify({"status": "ok", "message": "Datos guardados en Firebase"}), 200
     except Exception as e:
@@ -73,5 +77,4 @@ def obtener_datos(mac):
 
 
 if __name__ == '__main__':
-    # Ejecuta localmente en modo desarrollo
     app.run(host='0.0.0.0', port=5000)
