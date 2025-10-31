@@ -115,52 +115,62 @@ def recibir_datos():
             
             current_tier = get_tier(canastilla_nivel)
             
-            if current_tier > 0: # Solo nos importa si está en un umbral
-                
-                # 2. Revisar estado anterior de Firebase
-                datos_dispositivo = ref.get()
-                if not datos_dispositivo:
-                    datos_dispositivo = {}
-                
-                last_tier = datos_dispositivo.get("tierUltimaNotificacion", 0)
-                timestamp_ultima_notificacion = datos_dispositivo.get("timestampUltimaNotificacion", 0)
-                ahora = datetime.datetime.now().timestamp()
-                dos_horas_en_segundos = 7200 # 2 * 60 * 60
-                
-                notificar = False
-                razon = ""
+            # 2. Revisar estado anterior de Firebase
+            datos_dispositivo = ref.get()
+            if not datos_dispositivo:
+                datos_dispositivo = {}
+            
+            last_tier = datos_dispositivo.get("tierUltimaNotificacion", 0)
+            timestamp_ultima_notificacion = datos_dispositivo.get("timestampUltimaNotificacion", 0)
+            ahora = datetime.datetime.now().timestamp()
+            dos_horas_en_segundos = 7200 # 2 * 60 * 60
+            
+            notificar = False
+            razon = ""
 
-                # REGLA 1: El nivel ha SUBIDO a un nuevo umbral
-                if current_tier > last_tier:
-                    notificar = True
-                    razon = f"REGLA 1: Nivel subió a un nuevo umbral ({current_tier}%)"
-                
-                # REGLA 2: El nivel está ESTABLE, pero han pasado 2 horas
-                elif current_tier == last_tier and (ahora - timestamp_ultima_notificacion > dos_horas_en_segundos):
-                    notificar = True
-                    razon = f"REGLA 2: Recordatorio de 2 horas en umbral ({current_tier}%)"
-                
-                # REGLA 3: El nivel BAJÓ pero sigue en un umbral
-                elif current_tier < last_tier:
-                    # No notificamos, pero actualizamos el tier para REGLA 1 si vuelve a subir
-                    print(f"INFO: Nivel bajó a {current_tier}%. Actualizando 'tier' sin notificar.")
-                    ref.update({"tierUltimaNotificacion": current_tier})
-                
-                else:
-                    # Mismo tier, dentro de las 2 horas
-                    print(f"INFO: Umbral ({current_tier}%) estable y dentro del límite de 2 horas. No se notifica.")
+            # --- LÓGICA CORREGIDA ---
 
-                # 3. Enviar notificación si se cumple una regla
-                if notificar:
-                    print(f"INFO: {razon}. Enviando notificación...")
-                    mensaje = f"La canastilla está al {canastilla_nivel}% de su capacidad, se recomienda tomar acciones."
-                    
-                    if enviar_notificacion_fcm(mac, "Alerta de Canastilla 🗑️", mensaje):
-                        # Actualizar AMBOS campos solo si la notificación fue exitosa
-                        ref.update({
-                            "timestampUltimaNotificacion": ahora,
-                            "tierUltimaNotificacion": current_tier
-                        })
+            # REGLA 3 (REVISAR PRIMERO): El nivel BAJÓ.
+            # Esto resetea el umbral para que REGLA 1 pueda dispararse si vuelve a subir.
+            if current_tier < last_tier:
+                print(f"INFO: Nivel bajó de {last_tier}% a {current_tier}%. Actualizando 'tier' sin notificar.")
+                ref.update({"tierUltimaNotificacion": current_tier})
+                # No hay más que hacer.
+            
+            # REGLA 1: El nivel ha SUBIDO a un nuevo umbral.
+            # (Solo se dispara si current_tier > 0)
+            elif current_tier > last_tier and current_tier > 0:
+                notificar = True
+                razon = f"REGLA 1: Nivel subió a un nuevo umbral ({current_tier}%)"
+            
+            # REGLA 2: El nivel está ESTABLE (y > 0), pero han pasado 2 horas.
+            elif current_tier == last_tier and current_tier > 0 and (ahora - timestamp_ultima_notificacion > dos_horas_en_segundos):
+                notificar = True
+                razon = f"REGLA 2: Recordatorio de 2 horas en umbral ({current_tier}%)"
+            
+            # Condición de no-notificación (estable, dentro de las 2h)
+            elif current_tier == last_tier and current_tier > 0:
+                print(f"INFO: Umbral ({current_tier}%) estable y dentro del límite de 2 horas. No se notifica.")
+            
+            # Condición de no-notificación (estable, por debajo de 70)
+            elif current_tier == 0 and last_tier == 0:
+                 print(f"INFO: Nivel estable por debajo del umbral. No se notifica.")
+
+
+            # 3. Enviar notificación si se cumple una regla
+            if notificar:
+                # --- INICIO DE LA CORRECCIÓN DE INDENTACIÓN ---
+                # Esta línea estaba indentada un nivel de más
+                print(f"INFO: {razon}. Enviando notificación...")
+                # --- FIN DE LA CORRECCIÓN DE INDENTACIÓN ---
+                mensaje = f"La canastilla está al {canastilla_nivel}% de su capacidad, se recomienda tomar acciones."
+                
+                if enviar_notificacion_fcm(mac, "Alerta de Canastilla 🗑️", mensaje):
+                    # Actualizar AMBOS campos solo si la notificación fue exitosa
+                    ref.update({
+                        "timestampUltimaNotificacion": ahora,
+                        "tierUltimaNotificacion": current_tier
+                    })
 
         except Exception as e:
             # Si la lógica de notificación falla, lo imprimimos, pero no rompemos la ruta
