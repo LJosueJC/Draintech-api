@@ -42,12 +42,13 @@ def recibir_datos():
     caudal = data.get('caudal')
     obstruccion = data.get('obstruccion')
     canastilla = data.get('canastilla')
+    
+    # --- ¡ESTA ES LA CORRECCIÓN! ---
+    # Leemos las claves exactamente como vienen en el JSON (camelCase)
+    tapaAbierta = data.get('tapaAbierta')
+    registroAbierto = data.get('registroAbierto')
+    # --- FIN DE LA CORRECCIÓN ---
 
-    # --- INICIO DE LA CORRECIÓN ---
-    # Leemos las claves en snake_case, como las manda el ESP32
-    tapa_abierta = data.get('tapa_abierta')
-    registro_abierto = data.get('registro_abierto')
-    # --- FIN DE LA CORRECIÓN ---
 
     if not mac:
         return jsonify({"error": "MAC no proporcionada"}), 400
@@ -55,14 +56,16 @@ def recibir_datos():
     try:
         ref = db.reference(f"dispositivos/{mac}")
         
-        # Actualizamos Firebase con camelCase, como la App lo espera
+        # Ahora actualizamos Firebase. 
+        # Las claves de Firebase ya eran camelCase, lo cual es correcto.
+        # Y las variables que leímos ahora también tienen los datos correctos.
         ref.update({
             "lluvia": lluvia,
             "caudal": caudal,
             "obstruccion": obstruccion,
             "canastilla": canastilla,
-            "tapaAbierta": tapa_abierta,       # Variable local (tapa_abierta) -> Clave Firebase (tapaAbierta)
-            "registroAbierto": registro_abierto # Variable local (registro_abierto) -> Clave Firebase (registroAbierto)
+            "tapaAbierta": tapaAbierta,         # Variable 'tapaAbierta' (que SÍ tiene datos) -> Clave Firebase 'tapaAbierta'
+            "registroAbierto": registroAbierto # Variable 'registroAbierto' (que SÍ tiene datos) -> Clave Firebase 'registroAbierto'
         })
         return jsonify({"status": "ok", "message": "Datos guardados en Firebase"}), 200
     except Exception as e:
