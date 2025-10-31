@@ -4,7 +4,7 @@ import firebase_admin
 from firebase_admin import credentials, db, messaging
 import os
 import json
-import datetime # Importar para manejar el tiempo
+import datetime  # Importar para manejar el tiempo
 
 app = Flask(__name__)
 CORS(app)
@@ -22,7 +22,7 @@ if cred_json and firebase_db_url:
         })
         print("✅ Firebase inicializado correctamente.")
     except Exception as e:
-        print("❌ Error al inicializar Firebase:", e)
+        print(f"❌ Error al inicializar Firebase: {e}")
 else:
     print("⚠️ Variables de entorno FIREBASE_CRED o FIREBASE_DB no definidas.")
 
@@ -51,6 +51,21 @@ def enviar_notificacion_fcm(topic, title, body):
         print(f"❌ Error al enviar notificación FCM al tópico {topic_sanitizado}: {e}")
         return False
 
+# --- Función Auxiliar para Lógica de Umbrales ---
+def get_tier(nivel):
+    """
+    Determina el umbral (tier) basado en el nivel de la canastilla.
+    """
+    if nivel >= 100:
+        return 100
+    if nivel >= 90:
+        return 90
+    if nivel >= 80:
+        return 80
+    if nivel >= 70:
+        return 70
+    return 0 # Debajo del umbral
+
 # --- Ruta raíz ---
 @app.route('/')
 def home():
@@ -64,15 +79,16 @@ def recibir_datos():
         return jsonify({"error": "Solicitud inválida, no hay JSON."}), 400
 
     mac = data.get('mac')
+    if not mac:
+        return jsonify({"error": "MAC no proporcionada"}), 400
+    
+    # Obtener todos los datos
     lluvia = data.get('lluvia')
     caudal = data.get('caudal')
     obstruccion = data.get('obstruccion')
     canastilla = data.get('canastilla')
     tapaAbierta = data.get('tapaAbierta')
     registroAbierto = data.get('registroAbierto')
-
-    if not mac:
-        return jsonify({"error": "MAC no proporcionada"}), 400
 
     try:
         ref = db.reference(f"dispositivos/{mac}")
@@ -88,7 +104,7 @@ def recibir_datos():
         }
         ref.update(update_data)
         
-        # --- INICIO DE LÓGICA DE NOTIFICACIÓN ---
+        # --- INICIO DE LÓGICA DE NOTIFICACIÓN AVANZADA ---
         try:
             canastilla_nivel = 0
             if canastilla is not None:
@@ -97,30 +113,55 @@ def recibir_datos():
                 except ValueError:
                     print(f"Valor de canastilla no es un número: {canastilla}")
             
-            # 2. Revisar si la canastilla supera el umbral
-            if canastilla_nivel >= 70:
+            current_tier = get_tier(canastilla_nivel)
+            
+            if current_tier > 0: # Solo nos importa si está en un umbral
                 
-                # 3. Revisar cuándo fue la última notificación
+                # 2. Revisar estado anterior de Firebase
                 datos_dispositivo = ref.get()
-                # Usar .get() con un valor default de 0 si no existe
-                timestamp_ultima_notificacion = datos_dispositivo.get("timestampUltimaNotificacion", 0) 
+                if not datos_dispositivo:
+                    datos_dispositivo = {}
                 
+                last_tier = datos_dispositivo.get("tierUltimaNotificacion", 0)
+                timestamp_ultima_notificacion = datos_dispositivo.get("timestampUltimaNotificacion", 0)
                 ahora = datetime.datetime.now().timestamp()
                 dos_horas_en_segundos = 7200 # 2 * 60 * 60
                 
-                # 4. Comprobar si han pasado más de 2 horas
-                if (ahora - timestamp_ultima_notificacion > dos_horas_en_segundos):
-                    print(f"INFO: Umbral superado ({canastilla_nivel}%) y tiempo cumplido. Enviando notificación...")
-                    
-                    # 5. Enviar notificación
-                    mensaje = f"La canastilla está al {canastilla_nivel}% de su capacidad, se recomienda tomar acciones."
-                    if enviar_notificacion_fcm(mac, "Alerta de Canastilla 🗑️", mensaje):
-                    
-                        # 6. Actualizar el timestamp SOLO si la notificación fue exitosa
-                        ref.update({"timestampUltimaNotificacion": ahora})
+                notificar = False
+                razon = ""
+
+                # REGLA 1: El nivel ha SUBIDO a un nuevo umbral
+                if current_tier > last_tier:
+                    notificar = True
+                    razon = f"REGLA 1: Nivel subió a un nuevo umbral ({current_tier}%)"
+                
+                # REGLA 2: El nivel está ESTABLE, pero han pasado 2 horas
+                elif current_tier == last_tier and (ahora - timestamp_ultima_notificacion > dos_horas_en_segundos):
+                    notificar = True
+                    razon = f"REGLA 2: Recordatorio de 2 horas en umbral ({current_tier}%)"
+                
+                # REGLA 3: El nivel BAJÓ pero sigue en un umbral
+                elif current_tier < last_tier:
+                    # No notificamos, pero actualizamos el tier para REGLA 1 si vuelve a subir
+                    print(f"INFO: Nivel bajó a {current_tier}%. Actualizando 'tier' sin notificar.")
+                    ref.update({"tierUltimaNotificacion": current_tier})
+                
                 else:
-                    print(f"INFO: Umbral superado ({canastilla_nivel}%) pero dentro del límite de 2 horas. No se notifica.")
+                    # Mismo tier, dentro de las 2 horas
+                    print(f"INFO: Umbral ({current_tier}%) estable y dentro del límite de 2 horas. No se notifica.")
+
+                # 3. Enviar notificación si se cumple una regla
+                if notificar:
+                    print(f"INFO: {razon}. Enviando notificación...")
+                    mensaje = f"La canastilla está al {canastilla_nivel}% de su capacidad, se recomienda tomar acciones."
                     
+                    if enviar_notificacion_fcm(mac, "Alerta de Canastilla 🗑️", mensaje):
+                        # Actualizar AMBOS campos solo si la notificación fue exitosa
+                        ref.update({
+                            "timestampUltimaNotificacion": ahora,
+                            "tierUltimaNotificacion": current_tier
+                        })
+
         except Exception as e:
             # Si la lógica de notificación falla, lo imprimimos, pero no rompemos la ruta
             print(f"⚠️ Error en la lógica de notificación (no crítico): {e}")
@@ -146,5 +187,6 @@ def obtener_datos(mac):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    # El puerto 10000 es comúnmente usado por Render, pero Gunicorn lo manejará
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
 
