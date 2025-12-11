@@ -9,10 +9,8 @@ import datetime
 app = Flask(__name__)
 CORS(app)
 
-# --- CONFIGURACIÓN ---
-# Define aquí cuántos registros quieres guardar como máximo por dispositivo.
-# Como tu app grafica los últimos 10, guardar 50 es un buen margen de seguridad.
-MAX_REGISTROS = 50 
+
+MAX_REGISTROS = 25
 
 # --- Inicialización de Firebase ---
 cred_json = os.getenv("FIREBASE_CRED")
