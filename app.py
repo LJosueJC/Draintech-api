@@ -9,6 +9,11 @@ import datetime
 app = Flask(__name__)
 CORS(app)
 
+# --- CONFIGURACIÓN ---
+# Define aquí cuántos registros quieres guardar como máximo por dispositivo.
+# Como tu app grafica los últimos 10, guardar 50 es un buen margen de seguridad.
+MAX_REGISTROS = 50 
+
 # --- Inicialización de Firebase ---
 cred_json = os.getenv("FIREBASE_CRED")
 firebase_db_url = os.getenv("FIREBASE_DB")
@@ -51,9 +56,38 @@ def get_tier(nivel):
     if nivel >= 70: return 70
     return 0 
 
+# --- NUEVA FUNCIÓN: Limpieza de Historial ---
+def gestionar_tamano_historial(ref_historial):
+    """
+    Verifica la cantidad de registros y borra los más antiguos
+    si superan el MAX_REGISTROS.
+    """
+    try:
+        # Obtenemos todos los datos ordenados cronológicamente
+        snapshot = ref_historial.order_by_key().get()
+        
+        if snapshot and len(snapshot) > MAX_REGISTROS:
+            num_registros = len(snapshot)
+            cantidad_a_borrar = num_registros - MAX_REGISTROS
+            
+            # Obtenemos las llaves (IDs) de todos los registros
+            keys = list(snapshot.keys())
+            
+            # Seleccionamos las primeras llaves (las más antiguas)
+            keys_a_borrar = keys[:cantidad_a_borrar]
+            
+            print(f"🧹 Limpiando historial... Borrando {cantidad_a_borrar} registros antiguos.")
+            
+            # Usamos un update masivo con 'None' para borrar eficientemente
+            updates = {key: None for key in keys_a_borrar}
+            ref_historial.update(updates)
+            
+    except Exception as e:
+        print(f"⚠️ Error en limpieza de historial: {e}")
+
 @app.route('/')
 def home():
-    return jsonify({"message": "DrainTech API V2 (History Only) Running!"})
+    return jsonify({"message": "DrainTech API V2 (Auto-Clean Enabled) Running!"})
 
 # --- Ruta para recibir datos desde el ESP32 ---
 @app.route('/api/sensores', methods=['POST'])
@@ -65,7 +99,7 @@ def recibir_datos():
     mac = data.get('mac')
     if not mac:
         return jsonify({"error": "MAC no proporcionada"}), 400
-    
+      
     # Obtener variables
     lluvia = data.get('lluvia')
     caudal = data.get('caudal')
@@ -73,18 +107,15 @@ def recibir_datos():
     canastilla = data.get('canastilla')
     tapaAbierta = data.get('tapaAbierta')
     registroAbierto = data.get('registroAbierto')
-    
+      
     timestamp_actual = datetime.datetime.now().timestamp()
 
     try:
-        # 1. Referencia al CONTROL (Tabla pequeña, solo estado del sistema)
-        # YA NO USAMOS 'dispositivos' PARA SENSORES.
+        # 1. Referencias
         ref_control = db.reference(f"control/{mac}")
-        
-        # 2. Referencia al HISTORIAL (Aquí van los sensores)
         ref_historial = db.reference(f"historial/{mac}")
         
-        # Guardamos en HISTORIAL (Base de datos principal)
+        # Guardamos en HISTORIAL
         historial_data = {
             "timestamp": timestamp_actual,
             "canastilla": canastilla,
@@ -96,11 +127,13 @@ def recibir_datos():
         }
         ref_historial.push(historial_data)
         
-        # Actualizamos CONTROL (Solo metadatos y confirmación de estado)
-        # Esto sirve para que el sistema sepa el estado actual de notificaciones
-        # y confirme si el registro está abierto o cerrado.
+        # --- NUEVO: Ejecutar limpieza después de guardar ---
+        # Esto asegura que la base de datos nunca crezca infinitamente
+        gestionar_tamano_historial(ref_historial)
+        
+        # Actualizamos CONTROL
         control_update = {
-            "registroAbierto": registroAbierto, # Confirmación de estado
+            "registroAbierto": registroAbierto,
             "ultimoUpdate": timestamp_actual
         }
         ref_control.update(control_update)
@@ -114,7 +147,6 @@ def recibir_datos():
             
             current_tier = get_tier(canastilla_nivel)
             
-            # Leemos el estado de notificación desde la tabla 'control'
             datos_control = ref_control.get() or {}
             last_tier = datos_control.get("tierUltimaNotificacion", 0)
             timestamp_ultima_notificacion = datos_control.get("timestampUltimaNotificacion", 0)
@@ -145,21 +177,19 @@ def recibir_datos():
         except Exception as e:
             print(f"⚠️ Error notificación: {e}")
 
-        return jsonify({"status": "ok", "message": "Datos guardados en historial"}), 200
+        return jsonify({"status": "ok", "message": "Datos guardados y historial optimizado"}), 200
     
     except Exception as e:
         return jsonify({"error": f"Error al guardar: {e}"}), 500
 
-# Ruta GET modificada para leer del HISTORIAL (último registro)
+# Ruta GET para leer el último registro
 @app.route('/api/sensores/<mac>', methods=['GET'])
 def obtener_datos(mac):
     try:
-        # Ahora leemos el último registro del historial
         ref = db.reference(f"historial/{mac}")
         snapshot = ref.order_by_key().limit_to_last(1).get()
         
         if snapshot:
-            # Snapshot es un dict con una sola llave (el ID del push), necesitamos el valor interno
             key = list(snapshot.keys())[0]
             return jsonify(snapshot[key])
         else:
