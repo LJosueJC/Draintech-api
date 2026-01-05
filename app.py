@@ -9,191 +9,182 @@ import datetime
 app = Flask(__name__)
 CORS(app)
 
-
 MAX_REGISTROS = 25
 
-# --- Inicialización de Firebase ---
+# ─────────────────────────────────────────────
+# 🔥 Inicialización de Firebase
+# ─────────────────────────────────────────────
 cred_json = os.getenv("FIREBASE_CRED")
 firebase_db_url = os.getenv("FIREBASE_DB")
 
 if cred_json and firebase_db_url:
-    try:
-        cred_dict = json.loads(cred_json)
-        cred = credentials.Certificate(cred_dict)
-        firebase_admin.initialize_app(cred, {
-            "databaseURL": firebase_db_url
-        })
-        print("✅ Firebase inicializado correctamente.")
-    except Exception as e:
-        print(f"❌ Error al inicializar Firebase: {e}")
+    cred_dict = json.loads(cred_json)
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred, {
+        "databaseURL": firebase_db_url
+    })
+    print("✅ Firebase inicializado correctamente")
 else:
-    print("⚠️ Variables de entorno FIREBASE_CRED o FIREBASE_DB no definidas.")
+    print("❌ Variables FIREBASE no configuradas")
 
-# --- Función Auxiliar para Enviar Notificación ---
+# ─────────────────────────────────────────────
+# 🔔 Notificaciones FCM
+# ─────────────────────────────────────────────
 def enviar_notificacion_fcm(topic, title, body):
     try:
-        topic_sanitizado = topic.replace(":", "_")
+        topic = topic.replace(":", "_")
         message = messaging.Message(
             notification=messaging.Notification(
                 title=title,
-                body=body,
+                body=body
             ),
-            topic=topic_sanitizado
+            topic=topic
         )
-        response = messaging.send(message)
-        print(f"✅ Notificación enviada exitosamente al tópico {topic_sanitizado}: {response}")
+        messaging.send(message)
         return True
     except Exception as e:
-        print(f"❌ Error al enviar notificación FCM al tópico {topic_sanitizado}: {e}")
+        print("❌ Error FCM:", e)
         return False
 
+# ─────────────────────────────────────────────
+# 📊 Nivel de canastilla
+# ─────────────────────────────────────────────
 def get_tier(nivel):
     if nivel >= 100: return 100
     if nivel >= 90: return 90
     if nivel >= 80: return 80
     if nivel >= 70: return 70
-    return 0 
+    return 0
 
-# --- NUEVA FUNCIÓN: Limpieza de Historial ---
-def gestionar_tamano_historial(ref_historial):
-    """
-    Verifica la cantidad de registros y borra los más antiguos
-    si superan el MAX_REGISTROS.
-    """
-    try:
-        # Obtenemos todos los datos ordenados cronológicamente
-        snapshot = ref_historial.order_by_key().get()
-        
-        if snapshot and len(snapshot) > MAX_REGISTROS:
-            num_registros = len(snapshot)
-            cantidad_a_borrar = num_registros - MAX_REGISTROS
-            
-            # Obtenemos las llaves (IDs) de todos los registros
-            keys = list(snapshot.keys())
-            
-            # Seleccionamos las primeras llaves (las más antiguas)
-            keys_a_borrar = keys[:cantidad_a_borrar]
-            
-            print(f"🧹 Limpiando historial... Borrando {cantidad_a_borrar} registros antiguos.")
-            
-            # Usamos un update masivo con 'None' para borrar eficientemente
-            updates = {key: None for key in keys_a_borrar}
-            ref_historial.update(updates)
-            
-    except Exception as e:
-        print(f"⚠️ Error en limpieza de historial: {e}")
+# ─────────────────────────────────────────────
+# 🧹 Limpieza de historial
+# ─────────────────────────────────────────────
+def limpiar_historial(ref):
+    snapshot = ref.order_by_key().get()
+    if snapshot and len(snapshot) > MAX_REGISTROS:
+        borrar = list(snapshot.keys())[:len(snapshot) - MAX_REGISTROS]
+        ref.update({k: None for k in borrar})
 
+# ─────────────────────────────────────────────
+# 🌐 HOME
+# ─────────────────────────────────────────────
 @app.route('/')
 def home():
-    return jsonify({"message": "DrainTech API V2 (Auto-Clean Enabled) Running!"})
+    return jsonify({"status": "DrainTech API V3 ONLINE"})
 
-# --- Ruta para recibir datos desde el ESP32 ---
+# ─────────────────────────────────────────────
+# 📡 ESP32 → ENVÍO DE SENSORES
+# ─────────────────────────────────────────────
 @app.route('/api/sensores', methods=['POST'])
-def recibir_datos():
+def recibir_sensores():
     data = request.get_json()
-    if not data:
-        return jsonify({"error": "Solicitud inválida, no hay JSON."}), 400
+    mac = data.get("mac")
 
-    mac = data.get('mac')
     if not mac:
-        return jsonify({"error": "MAC no proporcionada"}), 400
-      
-    # Obtener variables
-    lluvia = data.get('lluvia')
-    caudal = data.get('caudal')
-    obstruccion = data.get('obstruccion')
-    canastilla = data.get('canastilla')
-    tapaAbierta = data.get('tapaAbierta')
-    registroAbierto = data.get('registroAbierto')
-      
-    timestamp_actual = datetime.datetime.now().timestamp()
+        return jsonify({"error": "MAC requerida"}), 400
 
-    try:
-        # 1. Referencias
-        ref_control = db.reference(f"control/{mac}")
-        ref_historial = db.reference(f"historial/{mac}")
-        
-        # Guardamos en HISTORIAL
-        historial_data = {
-            "timestamp": timestamp_actual,
-            "canastilla": canastilla,
-            "caudal": caudal,
-            "lluvia": 1 if lluvia else 0,
-            "obstruccion": 1 if obstruccion else 0,
-            "tapaAbierta": 1 if tapaAbierta else 0,
-            "registroAbierto": 1 if registroAbierto else 0
-        }
-        ref_historial.push(historial_data)
-        
-        # --- NUEVO: Ejecutar limpieza después de guardar ---
-        # Esto asegura que la base de datos nunca crezca infinitamente
-        gestionar_tamano_historial(ref_historial)
-        
-        # Actualizamos CONTROL
-        control_update = {
-            "registroAbierto": registroAbierto,
-            "ultimoUpdate": timestamp_actual
-        }
-        ref_control.update(control_update)
+    lluvia = data.get("lluvia", 0)
+    caudal = data.get("caudal", 0)
+    obstruccion = data.get("obstruccion", 0)
+    canastilla = data.get("canastilla", 0)
+    tapaAbierta = data.get("tapaAbierta", 0)
+    estadoRegistro = data.get("estadoRegistro", "DESCONOCIDO")
 
-        # --- LÓGICA DE NOTIFICACIONES ---
-        try:
-            canastilla_nivel = 0
-            if canastilla is not None:
-                try: canastilla_nivel = int(canastilla)
-                except ValueError: pass
-            
-            current_tier = get_tier(canastilla_nivel)
-            
-            datos_control = ref_control.get() or {}
-            last_tier = datos_control.get("tierUltimaNotificacion", 0)
-            timestamp_ultima_notificacion = datos_control.get("timestampUltimaNotificacion", 0)
-            
-            dos_horas_en_segundos = 7200
-            notificar = False
-            razon = ""
+    timestamp = datetime.datetime.now().timestamp()
 
-            if current_tier < last_tier:
-                ref_control.update({"tierUltimaNotificacion": current_tier})
-            elif current_tier > last_tier and current_tier > 0:
-                notificar = True
-                razon = f"REGLA 1: Nivel subió ({current_tier}%)"
-            elif current_tier == last_tier and current_tier > 0 and (timestamp_actual - timestamp_ultima_notificacion > dos_horas_en_segundos):
-                notificar = True
-                razon = f"REGLA 2: Recordatorio tiempo ({current_tier}%)"
+    ref_control = db.reference(f"control/{mac}")
+    ref_historial = db.reference(f"historial/{mac}")
 
-            if notificar:
-                print(f"INFO: {razon}. Enviando notificación...")
-                mensaje = f"La canastilla está al {canastilla_nivel}% de su capacidad."
-                
-                if enviar_notificacion_fcm(mac, "Alerta de Canastilla 🗑️", mensaje):
-                    ref_control.update({
-                        "timestampUltimaNotificacion": timestamp_actual,
-                        "tierUltimaNotificacion": current_tier
-                    })
+    # Guardar historial
+    ref_historial.push({
+        "timestamp": timestamp,
+        "lluvia": int(lluvia),
+        "caudal": caudal,
+        "obstruccion": int(obstruccion),
+        "canastilla": canastilla,
+        "tapaAbierta": int(tapaAbierta),
+        "estadoRegistro": estadoRegistro
+    })
 
-        except Exception as e:
-            print(f"⚠️ Error notificación: {e}")
+    limpiar_historial(ref_historial)
 
-        return jsonify({"status": "ok", "message": "Datos guardados y historial optimizado"}), 200
-    
-    except Exception as e:
-        return jsonify({"error": f"Error al guardar: {e}"}), 500
+    # Actualizar control (ESTADO, NO COMANDO)
+    ref_control.update({
+        "estadoRegistro": estadoRegistro,
+        "ultimoUpdate": timestamp
+    })
 
-# Ruta GET para leer el último registro
+    # ─────────── Notificaciones ───────────
+    nivel = int(canastilla)
+    tier_actual = get_tier(nivel)
+
+    control = ref_control.get() or {}
+    tier_anterior = control.get("tierUltimaNotificacion", 0)
+    ts_ultima = control.get("timestampUltimaNotificacion", 0)
+
+    if tier_actual > tier_anterior or (
+        tier_actual > 0 and timestamp - ts_ultima > 7200
+    ):
+        if enviar_notificacion_fcm(
+            mac,
+            "Alerta DrainTech 🚨",
+            f"Canastilla al {nivel}%"
+        ):
+            ref_control.update({
+                "tierUltimaNotificacion": tier_actual,
+                "timestampUltimaNotificacion": timestamp
+            })
+
+    return jsonify({"status": "ok"}), 200
+
+# ─────────────────────────────────────────────
+# 🎮 ESP32 ← COMANDO DE REGISTRO
+# ─────────────────────────────────────────────
+@app.route('/api/control/registro/<mac>', methods=['GET'])
+def leer_comando_registro(mac):
+    ref = db.reference(f"control/{mac}")
+    data = ref.get() or {}
+
+    return jsonify({
+        "cmdAbrirRegistro": data.get("cmdAbrirRegistro", False),
+        "estadoRegistro": data.get("estadoRegistro", "DESCONOCIDO")
+    }), 200
+
+# ─────────────────────────────────────────────
+# 📱 APP → ABRIR REGISTRO
+# ─────────────────────────────────────────────
+@app.route('/api/control/registro/<mac>', methods=['POST'])
+def enviar_comando_registro(mac):
+    ref = db.reference(f"control/{mac}")
+    ref.update({
+        "cmdAbrirRegistro": True
+    })
+    return jsonify({"status": "comando enviado"}), 200
+
+# ─────────────────────────────────────────────
+# 🔄 ESP32 → LIMPIAR COMANDO
+# ─────────────────────────────────────────────
+@app.route('/api/control/registro/<mac>/ack', methods=['POST'])
+def limpiar_comando(mac):
+    ref = db.reference(f"control/{mac}")
+    ref.update({
+        "cmdAbrirRegistro": False
+    })
+    return jsonify({"status": "ack recibido"}), 200
+
+# ─────────────────────────────────────────────
+# 📊 ÚLTIMO REGISTRO
+# ─────────────────────────────────────────────
 @app.route('/api/sensores/<mac>', methods=['GET'])
-def obtener_datos(mac):
-    try:
-        ref = db.reference(f"historial/{mac}")
-        snapshot = ref.order_by_key().limit_to_last(1).get()
-        
-        if snapshot:
-            key = list(snapshot.keys())[0]
-            return jsonify(snapshot[key])
-        else:
-            return jsonify({"error": "Sin datos"}), 404
-    except Exception as e:
-        return jsonify({"error": f"Error: {e}"}), 500
+def ultimo_registro(mac):
+    ref = db.reference(f"historial/{mac}")
+    data = ref.order_by_key().limit_to_last(1).get()
 
+    if not data:
+        return jsonify({"error": "Sin datos"}), 404
+
+    return jsonify(list(data.values())[0]), 200
+
+# ─────────────────────────────────────────────
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
