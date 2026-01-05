@@ -107,7 +107,6 @@ def recibir_datos():
         })
 
         # --- LÓGICA DE NOTIFICACIONES ---
-        # (Se mantiene igual que tu código original)
         canastilla_nivel = int(data.get('canastilla', 0))
         current_tier = get_tier(canastilla_nivel)
         datos_control = ref_control.get() or {}
@@ -123,7 +122,6 @@ def recibir_datos():
         return jsonify({"error": str(e)}), 500
 
 # 2. GET: El ESP32 consulta esta ruta para saber si debe abrir el registro
-# AHORA BUSCA EN EL NODO /control/ DIRECTAMENTE
 @app.route('/api/sensores/<mac>', methods=['GET'])
 def obtener_control(mac):
     try:
@@ -131,8 +129,6 @@ def obtener_control(mac):
         datos = ref.get()
         
         if datos:
-            # Solo devolvemos lo que el ESP32 necesita saber
-            # Si registroAbierto no existe, devolvemos 0 por defecto
             estado = 1 if datos.get('registroAbierto') is True else 0
             return jsonify({"registroAbierto": estado})
         else:
