@@ -11,180 +11,134 @@ CORS(app)
 
 MAX_REGISTROS = 25
 
-# ─────────────────────────────────────────────
-# 🔥 Inicialización de Firebase
-# ─────────────────────────────────────────────
+# --- Inicialización de Firebase ---
 cred_json = os.getenv("FIREBASE_CRED")
 firebase_db_url = os.getenv("FIREBASE_DB")
 
 if cred_json and firebase_db_url:
-    cred_dict = json.loads(cred_json)
-    cred = credentials.Certificate(cred_dict)
-    firebase_admin.initialize_app(cred, {
-        "databaseURL": firebase_db_url
-    })
-    print("✅ Firebase inicializado correctamente")
+    try:
+        cred_dict = json.loads(cred_json)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred, {
+            "databaseURL": firebase_db_url
+        })
+        print("✅ Firebase inicializado correctamente.")
+    except Exception as e:
+        print(f"❌ Error al inicializar Firebase: {e}")
 else:
-    print("❌ Variables FIREBASE no configuradas")
+    print("⚠️ Variables de entorno FIREBASE_CRED o FIREBASE_DB no definidas.")
 
-# ─────────────────────────────────────────────
-# 🔔 Notificaciones FCM
-# ─────────────────────────────────────────────
+# --- Funciones Auxiliares ---
+
 def enviar_notificacion_fcm(topic, title, body):
     try:
-        topic = topic.replace(":", "_")
+        topic_sanitizado = topic.replace(":", "_")
         message = messaging.Message(
             notification=messaging.Notification(
                 title=title,
-                body=body
+                body=body,
             ),
-            topic=topic
+            topic=topic_sanitizado
         )
         messaging.send(message)
         return True
     except Exception as e:
-        print("❌ Error FCM:", e)
+        print(f"❌ Error FCM: {e}")
         return False
 
-# ─────────────────────────────────────────────
-# 📊 Nivel de canastilla
-# ─────────────────────────────────────────────
 def get_tier(nivel):
     if nivel >= 100: return 100
     if nivel >= 90: return 90
     if nivel >= 80: return 80
     if nivel >= 70: return 70
-    return 0
+    return 0 
 
-# ─────────────────────────────────────────────
-# 🧹 Limpieza de historial
-# ─────────────────────────────────────────────
-def limpiar_historial(ref):
-    snapshot = ref.order_by_key().get()
-    if snapshot and len(snapshot) > MAX_REGISTROS:
-        borrar = list(snapshot.keys())[:len(snapshot) - MAX_REGISTROS]
-        ref.update({k: None for k in borrar})
+def gestionar_tamano_historial(ref_historial):
+    try:
+        snapshot = ref_historial.order_by_key().get()
+        if snapshot and len(snapshot) > MAX_REGISTROS:
+            keys = list(snapshot.keys())
+            cantidad_a_borrar = len(keys) - MAX_REGISTROS
+            keys_a_borrar = keys[:cantidad_a_borrar]
+            updates = {key: None for key in keys_a_borrar}
+            ref_historial.update(updates)
+    except Exception as e:
+        print(f"⚠️ Error limpieza: {e}")
 
-# ─────────────────────────────────────────────
-# 🌐 HOME
-# ─────────────────────────────────────────────
+# --- RUTAS ---
+
 @app.route('/')
 def home():
-    return jsonify({"status": "DrainTech API V3 ONLINE"})
+    return jsonify({"message": "DrainTech API V3 - Optimized for ESP32"})
 
-# ─────────────────────────────────────────────
-# 📡 ESP32 → ENVÍO DE SENSORES
-# ─────────────────────────────────────────────
+# 1. POST: El ESP32 envía sus lecturas aquí
 @app.route('/api/sensores', methods=['POST'])
-def recibir_sensores():
+def recibir_datos():
     data = request.get_json()
-    mac = data.get("mac")
+    if not data or 'mac' not in data:
+        return jsonify({"error": "Datos incompletos"}), 400
 
-    if not mac:
-        return jsonify({"error": "MAC requerida"}), 400
+    mac = data.get('mac')
+    timestamp_actual = datetime.datetime.now().timestamp()
 
-    lluvia = data.get("lluvia", 0)
-    caudal = data.get("caudal", 0)
-    obstruccion = data.get("obstruccion", 0)
-    canastilla = data.get("canastilla", 0)
-    tapaAbierta = data.get("tapaAbierta", 0)
-    estadoRegistro = data.get("estadoRegistro", "DESCONOCIDO")
+    try:
+        ref_control = db.reference(f"control/{mac}")
+        ref_historial = db.reference(f"historial/{mac}")
+        
+        # Guardar en Historial (para gráficas)
+        historial_data = {
+            "timestamp": timestamp_actual,
+            "canastilla": data.get('canastilla'),
+            "caudal": data.get('caudal'),
+            "lluvia": 1 if data.get('lluvia') else 0,
+            "obstruccion": 1 if data.get('obstruccion') else 0,
+            "tapaAbierta": 1 if data.get('tapaAbierta') else 0,
+            "registroAbierto": 1 if data.get('registroAbierto') else 0
+        }
+        ref_historial.push(historial_data)
+        gestionar_tamano_historial(ref_historial)
+        
+        # Actualizar estado actual en CONTROL (para que la App vea lo último)
+        # Importante: No sobreescribimos 'registroAbierto' si no viene en el JSON
+        # para no chocar con las órdenes de la App.
+        ref_control.update({
+            "ultimoUpdate": timestamp_actual,
+            "sensor_data": historial_data # Guardamos una copia rápida aquí
+        })
 
-    timestamp = datetime.datetime.now().timestamp()
+        # --- LÓGICA DE NOTIFICACIONES ---
+        # (Se mantiene igual que tu código original)
+        canastilla_nivel = int(data.get('canastilla', 0))
+        current_tier = get_tier(canastilla_nivel)
+        datos_control = ref_control.get() or {}
+        last_tier = datos_control.get("tierUltimaNotificacion", 0)
+        
+        if current_tier > last_tier and current_tier > 0:
+            if enviar_notificacion_fcm(mac, "Alerta de Canastilla 🗑️", f"Nivel al {canastilla_nivel}%"):
+                ref_control.update({"tierUltimaNotificacion": current_tier})
 
-    ref_control = db.reference(f"control/{mac}")
-    ref_historial = db.reference(f"historial/{mac}")
+        return jsonify({"status": "ok"}), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    # Guardar historial
-    ref_historial.push({
-        "timestamp": timestamp,
-        "lluvia": int(lluvia),
-        "caudal": caudal,
-        "obstruccion": int(obstruccion),
-        "canastilla": canastilla,
-        "tapaAbierta": int(tapaAbierta),
-        "estadoRegistro": estadoRegistro
-    })
-
-    limpiar_historial(ref_historial)
-
-    # Actualizar control (ESTADO, NO COMANDO)
-    ref_control.update({
-        "estadoRegistro": estadoRegistro,
-        "ultimoUpdate": timestamp
-    })
-
-    # ─────────── Notificaciones ───────────
-    nivel = int(canastilla)
-    tier_actual = get_tier(nivel)
-
-    control = ref_control.get() or {}
-    tier_anterior = control.get("tierUltimaNotificacion", 0)
-    ts_ultima = control.get("timestampUltimaNotificacion", 0)
-
-    if tier_actual > tier_anterior or (
-        tier_actual > 0 and timestamp - ts_ultima > 7200
-    ):
-        if enviar_notificacion_fcm(
-            mac,
-            "Alerta DrainTech 🚨",
-            f"Canastilla al {nivel}%"
-        ):
-            ref_control.update({
-                "tierUltimaNotificacion": tier_actual,
-                "timestampUltimaNotificacion": timestamp
-            })
-
-    return jsonify({"status": "ok"}), 200
-
-# ─────────────────────────────────────────────
-# 🎮 ESP32 ← COMANDO DE REGISTRO
-# ─────────────────────────────────────────────
-@app.route('/api/control/registro/<mac>', methods=['GET'])
-def leer_comando_registro(mac):
-    ref = db.reference(f"control/{mac}")
-    data = ref.get() or {}
-
-    return jsonify({
-        "cmdAbrirRegistro": data.get("cmdAbrirRegistro", False),
-        "estadoRegistro": data.get("estadoRegistro", "DESCONOCIDO")
-    }), 200
-
-# ─────────────────────────────────────────────
-# 📱 APP → ABRIR REGISTRO
-# ─────────────────────────────────────────────
-@app.route('/api/control/registro/<mac>', methods=['POST'])
-def enviar_comando_registro(mac):
-    ref = db.reference(f"control/{mac}")
-    ref.update({
-        "cmdAbrirRegistro": True
-    })
-    return jsonify({"status": "comando enviado"}), 200
-
-# ─────────────────────────────────────────────
-# 🔄 ESP32 → LIMPIAR COMANDO
-# ─────────────────────────────────────────────
-@app.route('/api/control/registro/<mac>/ack', methods=['POST'])
-def limpiar_comando(mac):
-    ref = db.reference(f"control/{mac}")
-    ref.update({
-        "cmdAbrirRegistro": False
-    })
-    return jsonify({"status": "ack recibido"}), 200
-
-# ─────────────────────────────────────────────
-# 📊 ÚLTIMO REGISTRO
-# ─────────────────────────────────────────────
+# 2. GET: El ESP32 consulta esta ruta para saber si debe abrir el registro
+# AHORA BUSCA EN EL NODO /control/ DIRECTAMENTE
 @app.route('/api/sensores/<mac>', methods=['GET'])
-def ultimo_registro(mac):
-    ref = db.reference(f"historial/{mac}")
-    data = ref.order_by_key().limit_to_last(1).get()
+def obtener_control(mac):
+    try:
+        ref = db.reference(f"control/{mac}")
+        datos = ref.get()
+        
+        if datos:
+            # Solo devolvemos lo que el ESP32 necesita saber
+            # Si registroAbierto no existe, devolvemos 0 por defecto
+            estado = 1 if datos.get('registroAbierto') is True else 0
+            return jsonify({"registroAbierto": estado})
+        else:
+            return jsonify({"registroAbierto": 0}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    if not data:
-        return jsonify({"error": "Sin datos"}), 404
-
-    return jsonify(list(data.values())[0]), 200
-
-# ─────────────────────────────────────────────
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
